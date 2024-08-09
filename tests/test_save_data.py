@@ -19,6 +19,9 @@ def test_save_data(mock_connect):
 
     curr = mock_conn.cursor()
 
+    curr.execute.assert_any_call("""SELECT fact, category, version
+                    FROM facts""")
+
     curr.execute("""
                 INSERT INTO facts (fact, 
                 category, version, created_at, updated_at)
@@ -32,7 +35,14 @@ def test_save_data(mock_connect):
                             updated_at = NOW()
                         WHERE fact = %s
                         """,
-                        (data[1]['fact'], data[1]['category']))    
+                        (2, data[1]['fact']))   
+
+    curr.execute("""
+            UPDATE facts
+            SET is_deleted = TRUE,
+                updated_at = NOW()
+            WHERE fact = %s
+            """, ('Some fact to delete',)) 
 
     assert mock_cursor.execute.call_count > 0
     mock_conn.commit.assert_called_once()

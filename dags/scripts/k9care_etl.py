@@ -85,6 +85,7 @@ def save_data(data, conn):
         cur.execute("""SELECT fact, category, version
                     FROM facts""")
         existing_facts = {row[0]: row for row in cur.fetchall()}
+        new_fact_set = {item['fact'] for item in data}
 
         for item in data:
             fact = item['fact']
@@ -103,7 +104,7 @@ def save_data(data, conn):
                 except psycopg2.Error as e:
                     conn.rollback()
                     logging.error("Error occured when updating: %s", e)
-                    # continue
+                    continue
             else:
                 try:
                     cur.execute("""
@@ -114,6 +115,23 @@ def save_data(data, conn):
                 except psycopg2.Error as e:
                     conn.rollback()
                     logging.error("Error occured when inserting: %s", e)
+                    continue
+
+        # Soft delete facts that are no longer in the new data
+        for existing_fact in existing_facts.keys():
+            if existing_fact not in new_fact_set and not \
+                existing_facts[existing_fact][3]:
+                try:
+                    cur.execute("""
+                        UPDATE facts
+                        SET is_deleted = TRUE,
+                            updated_at = NOW()
+                        WHERE fact = %s
+                        """,
+                        (existing_fact,))
+                except psycopg2.Error as e:
+                    conn.rollback()
+                    logging.error("Error occurred when marking as deleted: %s", e)
                     continue
         conn.commit()
         cur.close()
