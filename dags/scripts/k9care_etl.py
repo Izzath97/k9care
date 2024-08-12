@@ -87,8 +87,8 @@ def cosine_similarity(text1, text2):
     counter2 = Counter(text2.split())
 
     intersection = sum((counter1 & counter2).values())
-    norm1 = sum((counter1 ** 2).values()) ** 0.5
-    norm2 = sum((counter2 ** 2).values()) ** 0.5
+    norm1 = sum(value ** 2 for value in counter1.values()) ** 0.5
+    norm2 = sum(value ** 2 for value in counter2.values()) ** 0.5
 
     if not norm1 or not norm2:
         return 0.0
