@@ -1,13 +1,15 @@
 """
 This file handles the ETL process for K9 care data.
-It retrieves data from a remote github source, filters it, 
-and then saves it to a PostgreSQL database
+It retrieves data from a remote GitHub source, filters it,
+and then saves it to a PostgreSQL database.
 """
 import logging
 import json
 import re
+from collections import Counter
 import requests
 import psycopg2
+
 
 
 def clean_text(text):
@@ -23,6 +25,7 @@ def clean_text(text):
     """
     cleaned_text = re.sub(r'[^a-zA-Z0-9\s]', '', text)
     return cleaned_text
+
 
 def pull_data(url):
     """
@@ -53,7 +56,7 @@ def filter_data(data):
     Returns:
         list of dict: Processed list with 'fact' and 'category' keys.
     """
-    filterd_data = []
+    filtered_data = []
     for item in data:
         fact = clean_text(item.get("fact", ""))
 
@@ -65,8 +68,32 @@ def filter_data(data):
             "fact": fact,
             "category": category,
         }
-        filterd_data.append(result)
-    return filterd_data
+        filtered_data.append(result)
+    return filtered_data
+
+
+def cosine_similarity(text1, text2):
+    """
+    Compute the cosine similarity between two pieces of text.
+
+    Args:
+        text1 (str): First piece of text.
+        text2 (str): Second piece of text.
+
+    Returns:
+        float: Cosine similarity score.
+    """
+    counter1 = Counter(text1.split())
+    counter2 = Counter(text2.split())
+
+    intersection = sum((counter1 & counter2).values())
+    norm1 = sum((counter1 ** 2).values()) ** 0.5
+    norm2 = sum((counter2 ** 2).values()) ** 0.5
+
+    if not norm1 or not norm2:
+        return 0.0
+
+    return intersection / (norm1 * norm2)
 
 
 def save_data(data, conn):
@@ -82,57 +109,56 @@ def save_data(data, conn):
     """
     try:
         cur = conn.cursor()
-        cur.execute("""SELECT fact, category, version
-                    FROM facts""")
+        cur.execute("SELECT fact, category, version FROM facts WHERE is_deleted = FALSE")
         existing_facts = {row[0]: row for row in cur.fetchall()}
         new_fact_set = {item['fact'] for item in data}
 
+        # Lists to store records to update or insert
+        update_records = []
+        insert_records = []
+
         for item in data:
-            fact = item['fact']
+            new_fact = item['fact']
             category = item['category']
-            if fact in existing_facts:
-                existing_version = existing_facts[fact][2]
-                # Update the new version of the record
-                try:
-                    cur.execute("""
-                        UPDATE facts
-                        SET version = %s,
-                            updated_at = NOW()
-                        WHERE fact = %s
-                        """,
-                        (existing_version + 1, fact))
-                except psycopg2.Error as e:
-                    conn.rollback()
-                    logging.error("Error occured when updating: %s", e)
-                    continue
-            else:
-                try:
-                    cur.execute("""
-                        INSERT INTO facts (fact, 
-                        category, version, created_at, updated_at)
-                        VALUES (%s, %s, 1, NOW(), NOW())
-                        """, (fact, category))
-                except psycopg2.Error as e:
-                    conn.rollback()
-                    logging.error("Error occured when inserting: %s", e)
-                    continue
+            updated = False
+
+            for existing_fact_text, existing_fact_data in existing_facts.items():
+                similarity = cosine_similarity(new_fact, existing_fact_text)
+                if similarity >= 0.4:
+                    print(f"Would update: '{existing_fact_text}' to '\
+                        {new_fact}'(Similarity: {similarity:.2f})")
+                    update_records.append((new_fact, category,
+                                        existing_fact_data[2] + 1, existing_fact_text))
+                    updated = True
+                    break
+
+            if not updated:
+                print(f"Would insert new fact: '{new_fact}'")
+                insert_records.append((new_fact, category))
+
+        # Perform bulk updates
+        if update_records:
+            cur.executemany("""
+                UPDATE facts
+                SET fact = %s, category = %s, version = %s, updated_at = NOW()
+                WHERE fact = %s
+            """, update_records)
+
+        # Perform bulk inserts
+        if insert_records:
+            cur.executemany("""
+                INSERT INTO facts (fact, category, version, created_at, updated_at)
+                VALUES (%s, %s, 1, NOW(), NOW())
+            """, insert_records)
 
         # Soft delete facts that are no longer in the new data
         for existing_fact in existing_facts.keys():
-            if existing_fact not in new_fact_set and not \
-                existing_facts[existing_fact][3]:
-                try:
-                    cur.execute("""
-                        UPDATE facts
-                        SET is_deleted = TRUE,
-                            updated_at = NOW()
-                        WHERE fact = %s
-                        """,
-                        (existing_fact,))
-                except psycopg2.Error as e:
-                    conn.rollback()
-                    logging.error("Error occurred when marking as deleted: %s", e)
-                    continue
+            if existing_fact not in new_fact_set:
+                cur.execute("""
+                    UPDATE facts
+                    SET is_deleted = TRUE, updated_at = NOW()
+                    WHERE fact = %s
+                """, (existing_fact,))
         conn.commit()
         cur.close()
     except psycopg2.Error as e:
@@ -175,6 +201,7 @@ def main_pipeline():
         logging.error("Value error: %s", e)
     except KeyError as e:
         logging.error("Key error: %s", e)
+
 
 if __name__ == "__main__":
     main_pipeline()
